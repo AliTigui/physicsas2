@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#10151c" />
+  <title>Index vault · OnlineVault</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0f141b; --panel:#151d26; --line:#283542; --text:#e8eef3; --muted:#8b99a8; --teal:#64c8b4; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:var(--bg); color:var(--text); font:14px/1.6 system-ui,sans-serif; }
+    .card { width:min(600px,100%); border:1px solid var(--line); border-radius:14px; background:var(--panel); padding:30px; }
+    h1 { margin:0 0 4px; font-size:22px; }
+    h1 span { color:var(--teal); }
+    p { color:var(--muted); font-size:13px; }
+    code, pre { font:12px ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--teal); background:#0b1016; border:1px solid var(--line); border-radius:5px; padding:2px 6px; }
+    pre { display:inline-block; padding:9px 12px; }
+    button, .pick { display:inline-block; border:1px solid var(--teal); border-radius:7px; background:var(--teal); color:#08110f; font:600 13px system-ui,sans-serif; padding:10px 16px; cursor:pointer; margin:10px 8px 0 0; }
+    button:disabled { opacity:.5; cursor:default; }
+    button.secondary { background:transparent; color:var(--teal); }
+    ol { font-size:13px; color:var(--muted); padding-left:20px; }
+    #status { margin-top:16px; font-size:13px; white-space:pre-wrap; }
+    #status.ok { color:var(--teal); }
+    #status.err { color:#e08a7a; }
+    input[type=file] { display:block; margin-top:10px; font-size:12px; color:var(--muted); }
+    a { color:var(--teal); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Index <span>vault-assets</span></h1>
+    <p>Generate <code>vault.json</code> for the viewer. No install, no build — the page reads your notes locally and never uploads anything.</p>
+
+    <ol>
+      <li>Copy your Obsidian notes and attachments into the site's <code>vault-assets/</code> folder.</li>
+      <li>Open this page from the same site and choose that folder below.</li>
+      <li>Go back to <a href="./">the viewer</a> and refresh.</li>
+    </ol>
+
+    <button id="pickDir" type="button">Choose vault-assets folder</button>
+    <button id="fallbackToggle" class="secondary" type="button">Use file selection instead</button>
+    <div id="fallback" hidden>
+      <p>Select all files in your vault (<code>webkitdirectory</code>). The page will offer <code>vault.json</code> for download — save it inside <code>vault-assets/</code>.</p>
+      <input id="files" type="file" webkitdirectory multiple />
+      <button id="download" type="button" disabled>Download vault.json</button>
+    </div>
+    <div id="status" role="status"></div>
+  </main>
+
+  <script>
+    const EXCLUDED_DIRS = new Set(['.obsidian','.trash','.git','.github','.svn','node_modules','dist','build','out','.venv','venv','__pycache__','.idea','.vscode','.cache','.next','tools'])
+    const EXCLUDED_FILES = new Set(['thumbs.db','desktop.ini','.ds_store','.gitkeep','vault.json','_how_to_add_a_vault.txt'])
+    const SKIP_EXT = new Set(['.excalidraw','.canvas','.tmp','.log','.exe','.dll','.so','.pyc'])
+    const ASSET_EXT = new Set(['.png','.jpg','.jpeg','.gif','.webp','.svg','.avif','.bmp','.ico','.pdf','.mp4','.webm','.mov','.mp3','.wav','.ogg','.m4a','.txt','.mdx','.docx','.xlsx','.pptx'])
+    const ext = name => (name.match(/\.[^./]+$/) || [''])[0].toLowerCase()
+    const skip = name => name.startsWith('.') || EXCLUDED_DIRS.has(name) || EXCLUDED_FILES.has(name.toLowerCase()) || SKIP_EXT.has(ext(name))
+    const isPrivate = raw => {
+      const m = raw.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/)
+      return !!m && /(^|\n)(publish|published)\s*:\s*false\s*(#.*)?$/mi.test(m[1])
+    }
+    const payload = (name, notes, assets) => ({
+      version: 1,
+      name,
+      generatedAt: new Date().toISOString(),
+      notes: Object.fromEntries(Object.keys(notes).sort((a,b) => a.localeCompare(b)).map(k => [k, notes[k]])),
+      assets: [...new Set(assets)].sort((a,b) => a.localeCompare(b)),
+    })
+    const status = (text, kind = '') => {
+      const el = document.getElementById('status')
+      el.textContent = text
+      el.className = kind
+    }
+
+    // Preferred path: pick the vault-assets directory with write access.
+    document.getElementById('pickDir').addEventListener('click', async () => {
+      if (!window.showDirectoryPicker) {
+        status('Folder picking is not supported in this browser. Use "Use file selection instead" below.', 'err')
+        return
+      }
+      try {
+        const handle = await window.showDirectoryPicker({ mode: 'readwrite' })
+        const notes = {}, assets = []
+        let privateCount = 0
+        await walk(handle, '', notes, assets, () => privateCount++)
+        const data = JSON.stringify(payload(handle.name, notes, assets))
+        const file = await handle.getFileHandle('vault.json', { create: true })
+        const writable = await file.createWritable()
+        await writable.write(data)
+        await writable.close()
+        status(`Done: ${Object.keys(notes).length} notes, ${assets.length} attachments${privateCount ? `, ${privateCount} private notes skipped` : ''}.\nWrote vault.json in ${handle.name}. Refresh the viewer.`, 'ok')
+      } catch (error) {
+        if (error.name !== 'AbortError') status(`Could not index the folder: ${error.message}`, 'err')
+      }
+    })
+
+    async function walk(dir, relative, notes, assets, onPrivate) {
+      for await (const [name, entry] of dir.entries()) {
+        if (skip(name)) continue
+        const rel = relative ? `${relative}/${name}` : name
+        if (entry.kind === 'directory') {
+          await walk(entry, rel, notes, assets, onPrivate)
+        } else if (entry.kind === 'file') {
+          if (/\.md$/i.test(name)) {
+            const raw = await (await entry.getFile()).text()
+            if (isPrivate(raw)) onPrivate()
+            else notes[rel] = raw
+          } else if (ASSET_EXT.has(ext(name))) {
+            assets.push(rel)
+          }
+        }
+      }
+    }
+
+    // Fallback for browsers without the File System Access API: generate a download.
+    document.getElementById('fallbackToggle').addEventListener('click', () => {
+      document.getElementById('fallback').hidden = !document.getElementById('fallback').hidden
+    })
+
+    let generated = null
+    document.getElementById('files').addEventListener('change', async event => {
+      const files = [...event.target.files]
+      const notes = {}, assets = []
+      let privateCount = 0
+      for (const file of files) {
+        const parts = (file.webkitRelativePath || file.name).split('/')
+        const rel = parts.slice(1).join('/') || parts[0]
+        const name = parts[parts.length - 1]
+        if (parts.some(skip)) continue
+        if (/\.md$/i.test(name)) {
+          const raw = await file.text()
+          if (isPrivate(raw)) privateCount++
+          else notes[rel] = raw
+        } else if (ASSET_EXT.has(ext(name))) {
+          assets.push(rel)
+        }
+      }
+      generated = JSON.stringify(payload('vault', notes, assets))
+      document.getElementById('download').disabled = false
+      status(`Ready: ${Object.keys(notes).length} notes, ${assets.length} attachments${privateCount ? `, ${privateCount} private notes skipped` : ''}. Download and save the file as vault-assets/vault.json.`, 'ok')
+    })
+
+    document.getElementById('download').addEventListener('click', () => {
+      if (!generated) return
+      const url = URL.createObjectURL(new Blob([generated], { type: 'application/json' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'vault.json'
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+  </script>
+</body>
+</html>
