@@ -1,6 +1,6 @@
 {
   "collapse-filter": true,
-  "search": "",
+  "search": "tag:#المادة  ",
   "showTags": false,
   "showAttachments": false,
   "hideUnresolved": false,
@@ -17,6 +17,6 @@
   "repelStrength": 7.95828003542261,
   "linkStrength": 1,
   "linkDistance": 137,
-  "scale": 0.7789954574213315,
+  "scale": 0.6267370337049749,
   "close": true
 }
